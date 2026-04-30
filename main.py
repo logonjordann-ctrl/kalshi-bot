@@ -20,7 +20,8 @@ BASE_URL = (
     else "https://api.elections.kalshi.com"
 )
 
-DEFAULT_MAX_PRICE = 0.55
+DEFAULT_MAX_PRICE = 0.65
+MIN_SECONDS_LEFT = 600
 
 
 def load_private_key():
@@ -64,24 +65,14 @@ def request_kalshi(method, path, params=None, body=None, timeout=15):
     headers = sign_request(method, path)
 
     if method.upper() == "GET":
-        response = requests.get(
-            BASE_URL + path,
-            headers=headers,
-            params=params,
-            timeout=timeout,
-        )
+        response = requests.get(BASE_URL + path, headers=headers, params=params, timeout=timeout)
     elif method.upper() == "POST":
-        response = requests.post(
-            BASE_URL + path,
-            headers=headers,
-            json=body,
-            timeout=timeout,
-        )
+        response = requests.post(BASE_URL + path, headers=headers, json=body, timeout=timeout)
     else:
         raise Exception(f"Unsupported method: {method}")
 
     print("KALSHI REQUEST:", method.upper(), path, "PARAMS:", params, "STATUS:", response.status_code)
-    print("KALSHI RESPONSE:", response.text[:1500])
+    print("KALSHI RESPONSE:", response.text[:2000])
 
     return response
 
@@ -94,15 +85,12 @@ def parse_alert(raw_text):
             continue
 
         key, value = part.split("=", 1)
-        key = key.strip().upper()
-        value = value.strip()
+        parsed[key.strip().upper()] = value.strip()
 
-        if key:
-            parsed[key] = value
+    if "SIDE" not in parsed and "ACTION" in parsed:
+        parsed["SIDE"] = parsed["ACTION"]
 
-    required = ["SIDE", "STAKE"]
-    missing = [key for key in required if key not in parsed]
-
+    missing = [key for key in ["SIDE", "STAKE"] if key not in parsed]
     if missing:
         raise Exception(f"Alert missing required field(s): {', '.join(missing)}")
 
@@ -140,26 +128,18 @@ def normalize_market_hint(value):
 
 
 def market_is_btc_15m(market):
-    text_fields = [
-        market.get("ticker", ""),
-        market.get("event_ticker", ""),
-        market.get("series_ticker", ""),
-        market.get("title", ""),
-        market.get("subtitle", ""),
-    ]
-
-    text = " ".join(str(x) for x in text_fields).lower()
+    text = " ".join(
+        str(market.get(field, ""))
+        for field in ["ticker", "event_ticker", "series_ticker", "title", "subtitle"]
+    ).lower()
 
     has_btc = "btc" in text or "bitcoin" in text
     has_15m = (
         "kxbtc15m" in text
         or "15m" in text
-        or "15 m" in text
-        or "15min" in text
         or "15 min" in text
         or "15-minute" in text
         or "15 minute" in text
-        or "fifteen minute" in text
     )
 
     return has_btc and has_15m
@@ -171,10 +151,7 @@ def get_all_open_markets():
     markets = []
 
     while True:
-        params = {
-            "status": "open",
-            "limit": 1000,
-        }
+        params = {"status": "open", "limit": 1000}
 
         if cursor:
             params["cursor"] = cursor
@@ -183,14 +160,12 @@ def get_all_open_markets():
         response.raise_for_status()
 
         data = response.json()
-        page_markets = data.get("markets", [])
-        markets.extend(page_markets)
+        markets.extend(data.get("markets", []))
 
         cursor = data.get("cursor")
         if not cursor:
             break
 
-    print("TOTAL OPEN MARKETS FOUND:", len(markets))
     return markets
 
 
@@ -202,20 +177,16 @@ def get_market_by_ticker(ticker):
     response = request_kalshi("GET", path)
 
     if response.status_code == 200:
-        data = response.json()
-        return data.get("market")
+        return response.json().get("market")
 
     return None
 
 
-def select_nearest_open_market(candidates):
+def select_new_open_market(candidates):
     now = datetime.now(timezone.utc)
     valid_markets = []
 
     for market in candidates:
-        status = str(market.get("status", "")).lower()
-        status_market = str(market.get("status_market", "")).lower()
-
         close_time = market.get("close_time") or market.get("expiration_time") or ""
 
         try:
@@ -225,12 +196,10 @@ def select_nearest_open_market(candidates):
 
         seconds_until_close = (parsed_close_time - now).total_seconds()
 
-        # Do NOT trade closed markets.
-        # Do NOT trade markets with less than 10 minutes left.
-        # This keeps the bot focused on the newly opened 15-minute market.
-        if status in ["open", "active"] or status_market in ["open", "active"]:
-            if seconds_until_close > 600:
-                valid_markets.append(market)
+        # This prevents the bot from trading the previous closed market.
+        # It only allows markets with more than 10 minutes left.
+        if seconds_until_close > MIN_SECONDS_LEFT:
+            valid_markets.append(market)
 
     if not valid_markets:
         raise Exception(
@@ -252,17 +221,11 @@ def get_current_btc_15m_market(alert_market=None):
 
     print("NORMALIZED MARKET HINT:", exact)
 
-    # If TradingView sends a real exact Kalshi market ticker, use it.
-    # KXBTC15M is a series ticker, not an exact market ticker.
     if exact and exact != "KXBTC15M":
         direct_market = get_market_by_ticker(exact)
-
         if direct_market:
-            selected = select_nearest_open_market([direct_market])
-            print("USING EXACT ALERT MARKET TICKER:", exact)
-            return selected
+            return select_new_open_market([direct_market])
 
-    # Search the Kalshi BTC 15-minute series.
     path = "/trade-api/v2/markets"
     response = request_kalshi(
         "GET",
@@ -274,25 +237,18 @@ def get_current_btc_15m_market(alert_market=None):
         },
     )
 
-    print("SERIES MARKET STATUS:", response.status_code)
-    print("SERIES MARKET RESPONSE:", response.text[:1500])
-
     response.raise_for_status()
     data = response.json()
     candidates = data.get("markets", [])
 
-    # Fallback: if series lookup returns empty, scan all open markets.
     if not candidates:
-        print("SERIES LOOKUP EMPTY. FALLING BACK TO ALL OPEN MARKETS.")
         all_open = get_all_open_markets()
         candidates = [m for m in all_open if market_is_btc_15m(m)]
 
     if not candidates:
-        raise Exception(
-            "No BTC 15-minute markets found. Make sure KALSHI_ENV=prod."
-        )
+        raise Exception("No BTC 15-minute markets found. Make sure KALSHI_ENV=prod.")
 
-    selected = select_nearest_open_market(candidates)
+    selected = select_new_open_market(candidates)
 
     print("BTC 15M CANDIDATES FOUND:", len(candidates))
     print("SELECTED MARKET:", selected.get("ticker"), selected.get("title"), selected.get("close_time"))
@@ -303,6 +259,9 @@ def get_current_btc_15m_market(alert_market=None):
 def calculate_contracts(stake_dollars, max_price_cents):
     stake = float(stake_dollars)
     risk_per_contract = max_price_cents / 100
+
+    if stake <= 0:
+        raise Exception("STAKE must be greater than 0")
 
     if risk_per_contract <= 0:
         raise Exception("MAX_PRICE must be greater than 0")
@@ -323,6 +282,8 @@ def home():
             "service": "Kalshi TradingView webhook bot",
             "environment": KALSHI_ENV,
             "base_url": BASE_URL,
+            "default_max_price": DEFAULT_MAX_PRICE,
+            "min_seconds_left": MIN_SECONDS_LEFT,
         }
     )
 
@@ -343,7 +304,7 @@ def test_market():
                 "ticker": market.get("ticker"),
                 "title": market.get("title"),
                 "close_time": market.get("close_time"),
-                "status_market": market.get("status"),
+                "market_status": market.get("status"),
             }
         ), 200
 
@@ -367,7 +328,7 @@ def webhook():
         max_price_cents = dollars_to_cents(max_price)
 
         if max_price_cents > 99:
-            raise Exception("MAX_PRICE is too high. Use 0.55 for 55 cents, or 55.")
+            raise Exception("MAX_PRICE is too high. Use 0.65 for 65 cents, or 65.")
 
         market_hint = parsed.get("MARKET")
         market = get_current_btc_15m_market(market_hint)
@@ -385,6 +346,7 @@ def webhook():
             "count": contracts,
             "type": "limit",
             price_field: max_price_cents,
+            "time_in_force": "immediate_or_cancel",
         }
 
         print("ORDER:", order)
