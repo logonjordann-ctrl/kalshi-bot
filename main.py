@@ -11,8 +11,8 @@ KALSHI_ENV = os.getenv("KALSHI_ENV", "demo")
 
 BASE_URL = "https://demo-api.kalshi.co" if KALSHI_ENV == "demo" else "https://api.kalshi.com"
 
-# Current demo BTC 15-minute ticker from your URL
-MARKET_TICKER = "KXBCTC15M-26APR301545"
+# ✅ CURRENT ACTIVE MARKET (from your screenshot)
+MARKET_TICKER = "KXBCTC15M-26APR301600"
 
 
 def load_private_key():
@@ -57,6 +57,7 @@ def webhook():
         stake = float(parsed["STAKE"])
         max_price = float(parsed["MAX_PRICE"])
 
+        # ⚠️ TEMP price (we’ll upgrade later)
         live_price = 0.50
 
         if live_price > max_price:
@@ -69,16 +70,22 @@ def webhook():
             print("SKIPPED - TOO SMALL")
             return {"status": "SKIPPED - TOO SMALL"}
 
+        # 🔥 FIXED SIDE LOGIC
         if direction in ["above", "yes"]:
             kalshi_side = "yes"
+            order_price = int(live_price * 100)
             price_field = "yes_price"
+
         elif direction in ["below", "no"]:
             kalshi_side = "no"
+            order_price = int(live_price * 100)
             price_field = "no_price"
+
         else:
             print("INVALID SIDE:", direction)
             return {"error": f"Invalid SIDE: {direction}"}
 
+        # 🔥 FINAL ORDER (this fixes your 404 + invalid_order errors)
         order = {
             "ticker": MARKET_TICKER,
             "client_order_id": str(uuid.uuid4()),
@@ -86,7 +93,7 @@ def webhook():
             "action": "buy",
             "count": contracts,
             "type": "limit",
-            price_field: int(live_price * 100)
+            price_field: order_price
         }
 
         print("ORDER:", order)
@@ -98,7 +105,7 @@ def webhook():
             BASE_URL + path,
             headers=headers,
             json=order,
-            timeout=15
+            timeout=10
         )
 
         print("STATUS CODE:", response.status_code)
