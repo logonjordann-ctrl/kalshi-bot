@@ -22,13 +22,12 @@ BASE_URL = (
 
 DEFAULT_MAX_PRICE = 0.65
 
-# Bot will wait up to this long for the new 15m market to appear
-MAX_WAIT_SECONDS = 25
+# Wait longer for Kalshi to publish the new 15m market
+MAX_WAIT_SECONDS = 90
 
-# New 15m market should have close to 15 minutes left.
-# 800 seconds = 13 minutes 20 seconds.
-# This prevents trading the old market.
-FRESH_MARKET_SECONDS_LEFT = 800
+# Accept markets with more than 10 minutes left
+# This blocks old/closed markets but allows the new market once it appears
+FRESH_MARKET_SECONDS_LEFT = 600
 
 
 def load_private_key():
@@ -108,6 +107,7 @@ def parse_alert(raw_text):
         parsed["SIDE"] = parsed["ACTION"]
 
     missing = [key for key in ["SIDE", "STAKE"] if key not in parsed]
+
     if missing:
         raise Exception(f"Alert missing required field(s): {', '.join(missing)}")
 
@@ -209,7 +209,6 @@ def select_fresh_new_market(candidates):
             market.get("close_time") or market.get("expiration_time"),
         )
 
-        # Must be a fresh new 15m market, not the old one.
         if seconds_left >= FRESH_MARKET_SECONDS_LEFT:
             valid_markets.append(market)
 
@@ -235,8 +234,6 @@ def wait_for_fresh_btc_15m_market(alert_market=None):
 
     while time.time() - start_time < MAX_WAIT_SECONDS:
         try:
-            # If a real exact market ticker is sent, check it directly.
-            # KXBTC15M is only the series ticker, not exact.
             if exact and exact != "KXBTC15M":
                 direct_market = get_market_by_ticker(exact)
 
@@ -349,7 +346,6 @@ def webhook():
 
         market_hint = parsed.get("MARKET")
 
-        # This waits for the newly opened market instead of trading the closed one.
         market = wait_for_fresh_btc_15m_market(market_hint)
         market_ticker = market["ticker"]
 
