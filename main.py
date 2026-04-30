@@ -1,5 +1,6 @@
 from flask import Flask, request
 import os
+import requests
 
 app = Flask(__name__)
 
@@ -18,7 +19,7 @@ def webhook():
         # TEMP price (we will replace with real Kalshi price later)
         live_price = 0.50
 
-        # Safety check (your 55% rule)
+        # Safety check
         if live_price > max_price:
             return {"status": "SKIPPED - PRICE TOO HIGH"}
 
@@ -30,19 +31,31 @@ def webhook():
 
         order = {
             "ticker": "BTC-15M",
-            "action": "buy",
-            "side": side,
-            "count": contracts
+            "client_order_id": "tv-bot-1",
+            "side": side.upper(),
+            "action": "BUY",
+            "count": contracts,
+            "type": "market"
         }
 
         print("ORDER:", order)
 
-        return {"status": "ORDER SENT", "order": order}
+        # Choose environment
+        if os.getenv("KALSHI_ENV") == "demo":
+            url = "https://demo-api.kalshi.co/trade-api/v2/portfolio/orders"
+        else:
+            url = "https://api.kalshi.co/trade-api/v2/portfolio/orders"
+
+        response = requests.post(url, json=order)
+
+        print("KALSHI RESPONSE:", response.text)
+
+        return {"status": "ORDER SENT", "response": response.text}
 
     except Exception as e:
         return {"error": str(e)}
 
-# ✅ CRITICAL FIX FOR RAILWAY (DO NOT REMOVE)
+# Required for Railway
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
