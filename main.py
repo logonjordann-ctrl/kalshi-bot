@@ -10,11 +10,15 @@ PRIVATE_KEY_TEXT = os.getenv("KALSHI_PRIVATE_KEY")
 KALSHI_ENV = os.getenv("KALSHI_ENV", "demo")
 
 BASE_URL = "https://demo-api.kalshi.co" if KALSHI_ENV == "demo" else "https://api.elections.kalshi.com"
+
 BTC_SERIES = "KXBCTC15M"
 
 
 def load_private_key():
-    return serialization.load_pem_private_key(PRIVATE_KEY_TEXT.encode("utf-8"), password=None)
+    return serialization.load_pem_private_key(
+        PRIVATE_KEY_TEXT.encode("utf-8"),
+        password=None
+    )
 
 
 def sign_request(method, path):
@@ -45,24 +49,30 @@ def get_current_btc_ticker():
     response = requests.get(
         BASE_URL + path,
         params={
-            "series_ticker": BTC_SERIES,
             "status": "open",
-            "limit": 100
+            "limit": 1000
         },
         timeout=10
     )
 
     print("MARKETS STATUS:", response.status_code)
-    print("MARKETS RESPONSE:", response.text)
+    print("MARKETS RESPONSE:", response.text[:1000])
 
     data = response.json()
     markets = data.get("markets", [])
 
-    active = [
-        m for m in markets
-        if m.get("ticker", "").startswith(BTC_SERIES)
-        and m.get("status") == "open"
-    ]
+    active = []
+    for m in markets:
+        ticker = str(m.get("ticker", "")).upper()
+        title = str(m.get("title", "")).lower()
+        status = str(m.get("status", "")).lower()
+
+        if status == "open" and (
+            ticker.startswith(BTC_SERIES)
+            or ("btc" in ticker and "15m" in ticker)
+            or ("bitcoin" in title and "15" in title)
+        ):
+            active.append(m)
 
     if not active:
         raise Exception("No active BTC 15m market found")
