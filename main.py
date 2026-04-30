@@ -9,19 +9,16 @@ API_KEY_ID = os.getenv("KALSHI_API_KEY_ID")
 PRIVATE_KEY_TEXT = os.getenv("KALSHI_PRIVATE_KEY")
 KALSHI_ENV = os.getenv("KALSHI_ENV", "demo")
 
-BASE_URL = "https://demo-api.kalshi.co" if KALSHI_ENV == "demo" else "https://api.kalshi.co"
+BASE_URL = "https://demo-api.kalshi.co" if KALSHI_ENV == "demo" else "https://api.kalshi.com"
 
-# TEMP ticker from your current demo market page.
-# This expires, so after test we will make it automatic.
-MARKET_TICKER = "KXBCT15M-26APR301500"
-
+# ✅ UPDATE THIS EVERY 15 MINUTES
+MARKET_TICKER = "KXBCTC15M-26APR301515"
 
 def load_private_key():
     return serialization.load_pem_private_key(
         PRIVATE_KEY_TEXT.encode("utf-8"),
         password=None
     )
-
 
 def sign_request(method, path):
     timestamp = str(int(time.time() * 1000))
@@ -44,7 +41,6 @@ def sign_request(method, path):
         "Content-Type": "application/json"
     }
 
-
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.data.decode("utf-8")
@@ -57,6 +53,7 @@ def webhook():
         stake = float(parsed["STAKE"])
         max_price = float(parsed["MAX_PRICE"])
 
+        # Simulated price (you can improve later)
         live_price = 0.50
 
         if live_price > max_price:
@@ -72,12 +69,16 @@ def webhook():
         order = {
             "ticker": MARKET_TICKER,
             "client_order_id": str(uuid.uuid4()),
-            "side": side,
+            "side": "yes" if side == "above" else "no",
             "action": "buy",
             "count": contracts,
-            "type": "market",
-            "yes_price": int(live_price * 100)
+            "type": "limit",
+            "yes_price": int(live_price * 100) if side == "above" else None,
+            "no_price": int(live_price * 100) if side == "below" else None
         }
+
+        # remove None fields (important)
+        order = {k: v for k, v in order.items() if v is not None}
 
         print("ORDER:", order)
 
@@ -103,7 +104,6 @@ def webhook():
     except Exception as e:
         print("ERROR:", str(e))
         return {"error": str(e)}
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
