@@ -1,161 +1,349 @@
-from flask import Flask, request
-import os, time, base64, uuid, requests
+from flask import Flask, request, jsonify
+import os
+import time
+import base64
+import uuid
+import requests
+from datetime import datetime, timezone
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 
 app = Flask(__name__)
 
+# Railway environment variables needed:
+# KALSHI_API_KEY_ID
+# KALSHI_PRIVATE_KEY
+# Optional: KALSHI_ENV=prod or demo. Default is prod.
 API_KEY_ID = os.getenv("KALSHI_API_KEY_ID")
 PRIVATE_KEY_TEXT = os.getenv("KALSHI_PRIVATE_KEY")
-KALSHI_ENV = os.getenv("KALSHI_ENV", "demo")
+KALSHI_ENV = os.getenv("KALSHI_ENV", "prod").lower().strip()
 
-BASE_URL = "https://demo-api.kalshi.co" if KALSHI_ENV == "demo" else "https://api.elections.kalshi.com"
-BTC_SERIES = "KXBCTC15M"
+BASE_URL = (
+    "https://demo-api.kalshi.co"
+    if KALSHI_ENV == "demo"
+    else "https://api.elections.kalshi.com"
+)
+
+DEFAULT_MAX_PRICE = 0.55
 
 
 def load_private_key():
+    if not PRIVATE_KEY_TEXT:
+        raise Exception("Missing KALSHI_PRIVATE_KEY environment variable")
+
+    key_text = PRIVATE_KEY_TEXT.replace("\\n", "\n").strip()
+
     return serialization.load_pem_private_key(
-        PRIVATE_KEY_TEXT.encode("utf-8"),
-        password=None
+        key_text.encode("utf-8"),
+        password=None,
     )
 
 
 def sign_request(method, path):
+    if not API_KEY_ID:
+        raise Exception("Missing KALSHI_API_KEY_ID environment variable")
+
     timestamp = str(int(time.time() * 1000))
-    message = f"{timestamp}{method}{path}".encode("utf-8")
+    message = f"{timestamp}{method.upper()}{path}".encode("utf-8")
 
     private_key = load_private_key()
     signature = private_key.sign(
         message,
         padding.PSS(
             mgf=padding.MGF1(hashes.SHA256()),
-            salt_length=padding.PSS.DIGEST_LENGTH
+            salt_length=padding.PSS.DIGEST_LENGTH,
         ),
-        hashes.SHA256()
+        hashes.SHA256(),
     )
 
     return {
         "KALSHI-ACCESS-KEY": API_KEY_ID,
         "KALSHI-ACCESS-TIMESTAMP": timestamp,
         "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode("utf-8"),
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
 
 
-def get_current_btc_ticker():
+def request_kalshi(method, path, params=None, body=None, timeout=15):
+    headers = sign_request(method, path)
+
+    if method.upper() == "GET":
+        response = requests.get(
+            BASE_URL + path,
+            headers=headers,
+            params=params,
+            timeout=timeout,
+        )
+    elif method.upper() == "POST":
+        response = requests.post(
+            BASE_URL + path,
+            headers=headers,
+            json=body,
+            timeout=timeout,
+        )
+    else:
+        raise Exception(f"Unsupported method: {method}")
+
+    print("KALSHI REQUEST:", method.upper(), path, "STATUS:", response.status_code)
+    print("KALSHI RESPONSE:", response.text[:1500])
+
+    return response
+
+
+def parse_alert(raw_text):
+    parsed = {}
+
+    for part in raw_text.replace("\n", "|").split("|"):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        key = key.strip().upper()
+        value = value.strip()
+        if key:
+            parsed[key] = value
+
+    required = ["SIDE", "STAKE"]
+    missing = [key for key in required if key not in parsed]
+    if missing:
+        raise Exception(f"Alert missing required field(s): {', '.join(missing)}")
+
+    return parsed
+
+
+def dollars_to_cents(price):
+    price_float = float(price)
+    if price_float <= 1:
+        return int(round(price_float * 100))
+    return int(round(price_float))
+
+
+def normalize_side(value):
+    side = str(value).strip().lower()
+
+    if side in ["above", "yes", "up"]:
+        return "yes"
+
+    if side in ["below", "no", "down"]:
+        return "no"
+
+    raise Exception(f"Invalid SIDE value: {value}")
+
+
+def market_is_btc_15m(market):
+    text_fields = [
+        market.get("ticker", ""),
+        market.get("event_ticker", ""),
+        market.get("series_ticker", ""),
+        market.get("title", ""),
+        market.get("subtitle", ""),
+    ]
+
+    text = " ".join(str(x) for x in text_fields).lower()
+
+    has_btc = "btc" in text or "bitcoin" in text
+    has_15m = (
+        "15m" in text
+        or "15 m" in text
+        or "15min" in text
+        or "15 min" in text
+        or "15-minute" in text
+        or "15 minute" in text
+        or "fifteen minute" in text
+    )
+
+    return has_btc and has_15m
+
+
+def get_all_open_markets():
     path = "/trade-api/v2/markets"
     cursor = None
-    all_markets = []
+    markets = []
 
     while True:
         params = {
-            "series_ticker": BTC_SERIES,
             "status": "open",
-            "limit": 1000
+            "limit": 1000,
         }
 
         if cursor:
             params["cursor"] = cursor
 
-        response = requests.get(
-            BASE_URL + path,
-            params=params,
-            timeout=10
-        )
-
-        print("MARKETS STATUS:", response.status_code)
-        print("MARKETS RESPONSE:", response.text[:1000])
-
+        response = request_kalshi("GET", path, params=params)
         response.raise_for_status()
-        data = response.json()
 
-        all_markets.extend(data.get("markets", []))
+        data = response.json()
+        page_markets = data.get("markets", [])
+        markets.extend(page_markets)
 
         cursor = data.get("cursor")
         if not cursor:
             break
 
-    if not all_markets:
-        raise Exception("No open BTC 15m markets found from series_ticker")
+    print("TOTAL OPEN MARKETS FOUND:", len(markets))
+    return markets
 
-    all_markets.sort(key=lambda m: m.get("close_time") or m.get("expiration_time") or "")
-    ticker = all_markets[0]["ticker"]
 
-    print("ACTIVE MARKET TICKER:", ticker)
-    return ticker
+def get_market_by_ticker(ticker):
+    if not ticker:
+        return None
+
+    path = f"/trade-api/v2/markets/{ticker}"
+    response = request_kalshi("GET", path)
+
+    if response.status_code == 200:
+        data = response.json()
+        return data.get("market")
+
+    return None
+
+
+def get_current_btc_15m_market(alert_market=None):
+    # 1) If TradingView sends a real Kalshi ticker, use it.
+    exact = str(alert_market or "").strip().upper()
+    if exact:
+        direct_market = get_market_by_ticker(exact)
+        if direct_market and str(direct_market.get("status", "")).lower() == "open":
+            print("USING EXACT ALERT MARKET TICKER:", exact)
+            return direct_market
+
+    # 2) Otherwise scan open markets and find the active BTC 15-minute market.
+    all_open = get_all_open_markets()
+
+    candidates = [m for m in all_open if market_is_btc_15m(m)]
+
+    # 3) If the alert MARKET field is present, use it as an extra hint.
+    # Example: MARKET=BTC15M should match BTC/Bitcoin 15-minute markets, even if it is not the exact Kalshi ticker.
+    if exact and candidates:
+        compact_hint = exact.replace("-", "").replace("_", "").lower()
+        hinted = []
+        for market in candidates:
+            combined = " ".join(
+                str(market.get(field, ""))
+                for field in ["ticker", "event_ticker", "series_ticker", "title", "subtitle"]
+            ).replace("-", "").replace("_", "").lower()
+
+            if compact_hint in combined or compact_hint.replace("kx", "") in combined:
+                hinted.append(market)
+
+        if hinted:
+            candidates = hinted
+
+    if not candidates:
+        print("BTC 15M CANDIDATES FOUND: 0")
+        raise Exception(
+            "No open BTC 15-minute market found. Most likely KALSHI_ENV is set to demo, "
+            "or Kalshi has no currently open BTC 15-minute market."
+        )
+
+    now = datetime.now(timezone.utc)
+
+    def close_sort_key(market):
+        close_time = market.get("close_time") or market.get("expiration_time") or ""
+        try:
+            parsed_time = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
+            if parsed_time < now:
+                return "9999-99-99T99:99:99Z"
+            return close_time
+        except Exception:
+            return close_time or "9999-99-99T99:99:99Z"
+
+    candidates.sort(key=close_sort_key)
+
+    print("BTC 15M CANDIDATES FOUND:", len(candidates))
+    print("SELECTED MARKET:", candidates[0].get("ticker"), candidates[0].get("title"))
+
+    return candidates[0]
+
+
+def calculate_contracts(stake_dollars, max_price_cents):
+    stake = float(stake_dollars)
+    risk_per_contract = max_price_cents / 100
+
+    if risk_per_contract <= 0:
+        raise Exception("MAX_PRICE must be greater than 0")
+
+    contracts = int(stake // risk_per_contract)
+
+    if contracts < 1:
+        raise Exception("Stake is too small for at least 1 contract at this max price")
+
+    return contracts
+
+
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify(
+        {
+            "status": "online",
+            "service": "Kalshi TradingView webhook bot",
+            "environment": KALSHI_ENV,
+            "base_url": BASE_URL,
+        }
+    )
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"})
 
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.data.decode("utf-8")
-    print("ALERT RECEIVED:", data)
-
     try:
-        parsed = dict(part.split("=") for part in data.split("|"))
+        raw_text = request.data.decode("utf-8").strip()
+        print("ALERT RECEIVED:", raw_text)
+
+        parsed = parse_alert(raw_text)
         print("PARSED:", parsed)
 
-        direction = parsed["SIDE"].lower()
+        side = normalize_side(parsed["SIDE"])
         stake = float(parsed["STAKE"])
-        max_price = float(parsed["MAX_PRICE"])
 
-        live_price = 0.50
+        max_price = parsed.get("MAX_PRICE", DEFAULT_MAX_PRICE)
+        max_price_cents = dollars_to_cents(max_price)
 
-        if live_price > max_price:
-            print("SKIPPED - PRICE TOO HIGH")
-            return {"status": "SKIPPED - PRICE TOO HIGH"}
+        if max_price_cents > 99:
+            raise Exception("MAX_PRICE is too high. Use 0.55 for 55 cents, or 55.")
 
-        contracts = int(stake / live_price)
+        market_hint = parsed.get("MARKET")
+        market = get_current_btc_15m_market(market_hint)
+        market_ticker = market["ticker"]
 
-        if contracts < 1:
-            print("SKIPPED - TOO SMALL")
-            return {"status": "SKIPPED - TOO SMALL"}
+        contracts = calculate_contracts(stake, max_price_cents)
 
-        if direction in ["above", "yes"]:
-            kalshi_side = "yes"
-            price_field = "yes_price"
-        elif direction in ["below", "no"]:
-            kalshi_side = "no"
-            price_field = "no_price"
-        else:
-            print("INVALID SIDE:", direction)
-            return {"error": f"Invalid SIDE: {direction}"}
-
-        market_ticker = get_current_btc_ticker()
+        price_field = "yes_price" if side == "yes" else "no_price"
 
         order = {
             "ticker": market_ticker,
             "client_order_id": str(uuid.uuid4()),
-            "side": kalshi_side,
+            "side": side,
             "action": "buy",
             "count": contracts,
             "type": "limit",
-            price_field: int(live_price * 100)
+            price_field: max_price_cents,
         }
 
         print("ORDER:", order)
 
         path = "/trade-api/v2/portfolio/orders"
-        headers = sign_request("POST", path)
+        response = request_kalshi("POST", path, body=order)
 
-        response = requests.post(
-            BASE_URL + path,
-            headers=headers,
-            json=order,
-            timeout=10
-        )
-
-        print("STATUS CODE:", response.status_code)
-        print("KALSHI RESPONSE:", response.text)
-
-        return {
-            "status": "ORDER SENT",
+        result = {
+            "status": "ORDER SENT" if response.status_code in [200, 201] else "ORDER REJECTED",
             "status_code": response.status_code,
-            "response": response.text
+            "market_ticker": market_ticker,
+            "side": side,
+            "contracts": contracts,
+            "max_price_cents": max_price_cents,
+            "kalshi_response": response.text,
         }
 
-    except Exception as e:
-        print("ERROR:", str(e))
-        return {"error": str(e)}
+        print("RESULT:", result)
+        return jsonify(result), 200
+
+    except Exception as error:
+        print("ERROR:", str(error))
+        return jsonify({"status": "ERROR", "error": str(error)}), 400
 
 
 if __name__ == "__main__":
