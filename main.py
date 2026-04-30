@@ -11,14 +11,16 @@ KALSHI_ENV = os.getenv("KALSHI_ENV", "demo")
 
 BASE_URL = "https://demo-api.kalshi.co" if KALSHI_ENV == "demo" else "https://api.kalshi.com"
 
-# ✅ UPDATE THIS EVERY 15 MINUTES
+# This expires every 15 minutes
 MARKET_TICKER = "KXBCTC15M-26APR301515"
+
 
 def load_private_key():
     return serialization.load_pem_private_key(
         PRIVATE_KEY_TEXT.encode("utf-8"),
         password=None
     )
+
 
 def sign_request(method, path):
     timestamp = str(int(time.time() * 1000))
@@ -41,6 +43,7 @@ def sign_request(method, path):
         "Content-Type": "application/json"
     }
 
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.data.decode("utf-8")
@@ -49,11 +52,10 @@ def webhook():
     try:
         parsed = dict(part.split("=") for part in data.split("|"))
 
-        side = parsed["SIDE"].lower()
+        direction = parsed["SIDE"].lower()
         stake = float(parsed["STAKE"])
         max_price = float(parsed["MAX_PRICE"])
 
-        # Simulated price (you can improve later)
         live_price = 0.50
 
         if live_price > max_price:
@@ -66,19 +68,24 @@ def webhook():
             print("SKIPPED - TOO SMALL")
             return {"status": "SKIPPED - TOO SMALL"}
 
+        if direction == "above":
+            kalshi_side = "yes"
+            price_field = "yes_price"
+        elif direction == "below":
+            kalshi_side = "no"
+            price_field = "no_price"
+        else:
+            return {"error": "SIDE must be ABOVE or BELOW"}
+
         order = {
             "ticker": MARKET_TICKER,
             "client_order_id": str(uuid.uuid4()),
-            "side": "yes" if side == "above" else "no",
+            "side": kalshi_side,
             "action": "buy",
             "count": contracts,
             "type": "limit",
-            "yes_price": int(live_price * 100) if side == "above" else None,
-            "no_price": int(live_price * 100) if side == "below" else None
+            price_field: int(live_price * 100)
         }
-
-        # remove None fields (important)
-        order = {k: v for k, v in order.items() if v is not None}
 
         print("ORDER:", order)
 
@@ -104,6 +111,7 @@ def webhook():
     except Exception as e:
         print("ERROR:", str(e))
         return {"error": str(e)}
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
