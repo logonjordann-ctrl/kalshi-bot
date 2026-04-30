@@ -9,17 +9,12 @@ API_KEY_ID = os.getenv("KALSHI_API_KEY_ID")
 PRIVATE_KEY_TEXT = os.getenv("KALSHI_PRIVATE_KEY")
 KALSHI_ENV = os.getenv("KALSHI_ENV", "demo")
 
-BASE_URL = "https://demo-api.kalshi.co" if KALSHI_ENV == "demo" else "https://api.kalshi.com"
-
-# ✅ CURRENT ACTIVE MARKET (from your screenshot)
-MARKET_TICKER = "KXBCTC15M-26APR301600"
+BASE_URL = "https://demo-api.kalshi.co" if KALSHI_ENV == "demo" else "https://api.elections.kalshi.com"
+BTC_SERIES = "KXBCTC15M"
 
 
 def load_private_key():
-    return serialization.load_pem_private_key(
-        PRIVATE_KEY_TEXT.encode("utf-8"),
-        password=None
-    )
+    return serialization.load_pem_private_key(PRIVATE_KEY_TEXT.encode("utf-8"), password=None)
 
 
 def sign_request(method, path):
@@ -44,6 +39,41 @@ def sign_request(method, path):
     }
 
 
+def get_current_btc_ticker():
+    path = "/trade-api/v2/markets"
+
+    response = requests.get(
+        BASE_URL + path,
+        params={
+            "series_ticker": BTC_SERIES,
+            "status": "open",
+            "limit": 100
+        },
+        timeout=10
+    )
+
+    print("MARKETS STATUS:", response.status_code)
+    print("MARKETS RESPONSE:", response.text)
+
+    data = response.json()
+    markets = data.get("markets", [])
+
+    active = [
+        m for m in markets
+        if m.get("ticker", "").startswith(BTC_SERIES)
+        and m.get("status") == "open"
+    ]
+
+    if not active:
+        raise Exception("No active BTC 15m market found")
+
+    active.sort(key=lambda m: m.get("close_time") or m.get("expiration_time") or "")
+    ticker = active[0]["ticker"]
+
+    print("ACTIVE MARKET TICKER:", ticker)
+    return ticker
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.data.decode("utf-8")
@@ -57,7 +87,6 @@ def webhook():
         stake = float(parsed["STAKE"])
         max_price = float(parsed["MAX_PRICE"])
 
-        # ⚠️ TEMP price (we’ll upgrade later)
         live_price = 0.50
 
         if live_price > max_price:
@@ -70,30 +99,26 @@ def webhook():
             print("SKIPPED - TOO SMALL")
             return {"status": "SKIPPED - TOO SMALL"}
 
-        # 🔥 FIXED SIDE LOGIC
         if direction in ["above", "yes"]:
             kalshi_side = "yes"
-            order_price = int(live_price * 100)
             price_field = "yes_price"
-
         elif direction in ["below", "no"]:
             kalshi_side = "no"
-            order_price = int(live_price * 100)
             price_field = "no_price"
-
         else:
             print("INVALID SIDE:", direction)
             return {"error": f"Invalid SIDE: {direction}"}
 
-        # 🔥 FINAL ORDER (this fixes your 404 + invalid_order errors)
+        market_ticker = get_current_btc_ticker()
+
         order = {
-            "ticker": MARKET_TICKER,
+            "ticker": market_ticker,
             "client_order_id": str(uuid.uuid4()),
             "side": kalshi_side,
             "action": "buy",
             "count": contracts,
             "type": "limit",
-            price_field: order_price
+            price_field: int(live_price * 100)
         }
 
         print("ORDER:", order)
