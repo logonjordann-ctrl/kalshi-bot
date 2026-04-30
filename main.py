@@ -84,7 +84,7 @@ def request_kalshi(method, path, params=None, body=None, timeout=15):
     else:
         raise Exception(f"Unsupported method: {method}")
 
-    print("KALSHI REQUEST:", method.upper(), path, "STATUS:", response.status_code)
+    print("KALSHI REQUEST:", method.upper(), path, "PARAMS:", params, "STATUS:", response.status_code)
     print("KALSHI RESPONSE:", response.text[:1500])
 
     return response
@@ -142,7 +142,8 @@ def market_is_btc_15m(market):
 
     has_btc = "btc" in text or "bitcoin" in text
     has_15m = (
-        "15m" in text
+        "kxbtc15m" in text
+        or "15m" in text
         or "15 m" in text
         or "15min" in text
         or "15 min" in text
@@ -197,44 +198,16 @@ def get_market_by_ticker(ticker):
     return None
 
 
-def get_current_btc_15m_market(alert_market=None):
-    # 1) If TradingView sends a real Kalshi ticker, use it.
-    exact = str(alert_market or "").strip().upper()
-    if exact:
-        direct_market = get_market_by_ticker(exact)
-        if direct_market and str(direct_market.get("status", "")).lower() == "open":
-            print("USING EXACT ALERT MARKET TICKER:", exact)
-            return direct_market
+def normalize_market_hint(value):
+    hint = str(value or "").strip().upper()
 
-    # 2) Otherwise scan open markets and find the active BTC 15-minute market.
-    all_open = get_all_open_markets()
+    if hint in ["", "BTC15M", "BTC_15M", "BTC-15M", "BTCUSD15M", "BTCUSD_15M", "BTCUSD-15M"]:
+        return "KXBTC15M"
 
-    candidates = [m for m in all_open if market_is_btc_15m(m)]
+    return hint
 
-    # 3) If the alert MARKET field is present, use it as an extra hint.
-    # Example: MARKET=BTC15M should match BTC/Bitcoin 15-minute markets, even if it is not the exact Kalshi ticker.
-    if exact and candidates:
-        compact_hint = exact.replace("-", "").replace("_", "").lower()
-        hinted = []
-        for market in candidates:
-            combined = " ".join(
-                str(market.get(field, ""))
-                for field in ["ticker", "event_ticker", "series_ticker", "title", "subtitle"]
-            ).replace("-", "").replace("_", "").lower()
 
-            if compact_hint in combined or compact_hint.replace("kx", "") in combined:
-                hinted.append(market)
-
-        if hinted:
-            candidates = hinted
-
-    if not candidates:
-        print("BTC 15M CANDIDATES FOUND: 0")
-        raise Exception(
-            "No open BTC 15-minute market found. Most likely KALSHI_ENV is set to demo, "
-            "or Kalshi has no currently open BTC 15-minute market."
-        )
-
+def select_nearest_open_market(candidates):
     now = datetime.now(timezone.utc)
 
     def close_sort_key(market):
@@ -248,11 +221,59 @@ def get_current_btc_15m_market(alert_market=None):
             return close_time or "9999-99-99T99:99:99Z"
 
     candidates.sort(key=close_sort_key)
+    return candidates[0]
+
+
+def get_current_btc_15m_market(alert_market=None):
+    exact = normalize_market_hint(alert_market)
+
+    print("NORMALIZED MARKET HINT:", exact)
+
+    # If TradingView sends a real exact Kalshi market ticker, use it.
+    # KXBTC15M is a series ticker, not an exact market ticker.
+    if exact and exact != "KXBTC15M":
+        direct_market = get_market_by_ticker(exact)
+        if direct_market and str(direct_market.get("status", "")).lower() == "open":
+            print("USING EXACT ALERT MARKET TICKER:", exact)
+            return direct_market
+
+    # Search the Kalshi BTC 15-minute series.
+    path = "/trade-api/v2/markets"
+    response = request_kalshi(
+        "GET",
+        path,
+        params={
+            "series_ticker": "KXBTC15M",
+            "status": "open",
+            "limit": 1000,
+        },
+    )
+
+    print("SERIES MARKET STATUS:", response.status_code)
+    print("SERIES MARKET RESPONSE:", response.text[:1500])
+
+    response.raise_for_status()
+    data = response.json()
+    candidates = data.get("markets", [])
+
+    # Fallback: if series lookup returns empty, scan all open markets.
+    if not candidates:
+        print("SERIES LOOKUP EMPTY. FALLING BACK TO ALL OPEN MARKETS.")
+        all_open = get_all_open_markets()
+        candidates = [m for m in all_open if market_is_btc_15m(m)]
+
+    if not candidates:
+        print("BTC 15M CANDIDATES FOUND: 0")
+        raise Exception(
+            "No open BTC 15-minute market found. Make sure KALSHI_ENV=prod."
+        )
+
+    selected = select_nearest_open_market(candidates)
 
     print("BTC 15M CANDIDATES FOUND:", len(candidates))
-    print("SELECTED MARKET:", candidates[0].get("ticker"), candidates[0].get("title"))
+    print("SELECTED MARKET:", selected.get("ticker"), selected.get("title"))
 
-    return candidates[0]
+    return selected
 
 
 def calculate_contracts(stake_dollars, max_price_cents):
@@ -285,6 +306,23 @@ def home():
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
+
+
+@app.route("/test-market", methods=["GET"])
+def test_market():
+    try:
+        market = get_current_btc_15m_market("BTC15M")
+        return jsonify(
+            {
+                "status": "OK",
+                "ticker": market.get("ticker"),
+                "title": market.get("title"),
+                "close_time": market.get("close_time"),
+                "status_market": market.get("status"),
+            }
+        ), 200
+    except Exception as error:
+        return jsonify({"status": "ERROR", "error": str(error)}), 400
 
 
 @app.route("/webhook", methods=["POST"])
