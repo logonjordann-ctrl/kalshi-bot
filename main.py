@@ -21,7 +21,14 @@ BASE_URL = (
 )
 
 DEFAULT_MAX_PRICE = 0.65
-MIN_SECONDS_LEFT = 600
+
+# Bot will wait up to this long for the new 15m market to appear
+MAX_WAIT_SECONDS = 25
+
+# New 15m market should have close to 15 minutes left.
+# 800 seconds = 13 minutes 20 seconds.
+# This prevents trading the old market.
+FRESH_MARKET_SECONDS_LEFT = 800
 
 
 def load_private_key():
@@ -65,9 +72,19 @@ def request_kalshi(method, path, params=None, body=None, timeout=15):
     headers = sign_request(method, path)
 
     if method.upper() == "GET":
-        response = requests.get(BASE_URL + path, headers=headers, params=params, timeout=timeout)
+        response = requests.get(
+            BASE_URL + path,
+            headers=headers,
+            params=params,
+            timeout=timeout,
+        )
     elif method.upper() == "POST":
-        response = requests.post(BASE_URL + path, headers=headers, json=body, timeout=timeout)
+        response = requests.post(
+            BASE_URL + path,
+            headers=headers,
+            json=body,
+            timeout=timeout,
+        )
     else:
         raise Exception(f"Unsupported method: {method}")
 
@@ -127,48 +144,6 @@ def normalize_market_hint(value):
     return hint
 
 
-def market_is_btc_15m(market):
-    text = " ".join(
-        str(market.get(field, ""))
-        for field in ["ticker", "event_ticker", "series_ticker", "title", "subtitle"]
-    ).lower()
-
-    has_btc = "btc" in text or "bitcoin" in text
-    has_15m = (
-        "kxbtc15m" in text
-        or "15m" in text
-        or "15 min" in text
-        or "15-minute" in text
-        or "15 minute" in text
-    )
-
-    return has_btc and has_15m
-
-
-def get_all_open_markets():
-    path = "/trade-api/v2/markets"
-    cursor = None
-    markets = []
-
-    while True:
-        params = {"status": "open", "limit": 1000}
-
-        if cursor:
-            params["cursor"] = cursor
-
-        response = request_kalshi("GET", path, params=params)
-        response.raise_for_status()
-
-        data = response.json()
-        markets.extend(data.get("markets", []))
-
-        cursor = data.get("cursor")
-        if not cursor:
-            break
-
-    return markets
-
-
 def get_market_by_ticker(ticker):
     if not ticker:
         return None
@@ -182,51 +157,9 @@ def get_market_by_ticker(ticker):
     return None
 
 
-def select_new_open_market(candidates):
-    now = datetime.now(timezone.utc)
-    valid_markets = []
-
-    for market in candidates:
-        close_time = market.get("close_time") or market.get("expiration_time") or ""
-
-        try:
-            parsed_close_time = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
-        except Exception:
-            continue
-
-        seconds_until_close = (parsed_close_time - now).total_seconds()
-
-        # This prevents the bot from trading the previous closed market.
-        # It only allows markets with more than 10 minutes left.
-        if seconds_until_close > MIN_SECONDS_LEFT:
-            valid_markets.append(market)
-
-    if not valid_markets:
-        raise Exception(
-            "No valid BTC 15-minute market with more than 10 minutes left. "
-            "Waiting for the new market to open."
-        )
-
-    valid_markets.sort(
-        key=lambda market: datetime.fromisoformat(
-            (market.get("close_time") or market.get("expiration_time")).replace("Z", "+00:00")
-        )
-    )
-
-    return valid_markets[0]
-
-
-def get_current_btc_15m_market(alert_market=None):
-    exact = normalize_market_hint(alert_market)
-
-    print("NORMALIZED MARKET HINT:", exact)
-
-    if exact and exact != "KXBTC15M":
-        direct_market = get_market_by_ticker(exact)
-        if direct_market:
-            return select_new_open_market([direct_market])
-
+def get_btc_15m_candidates():
     path = "/trade-api/v2/markets"
+
     response = request_kalshi(
         "GET",
         path,
@@ -239,21 +172,103 @@ def get_current_btc_15m_market(alert_market=None):
 
     response.raise_for_status()
     data = response.json()
-    candidates = data.get("markets", [])
 
-    if not candidates:
-        all_open = get_all_open_markets()
-        candidates = [m for m in all_open if market_is_btc_15m(m)]
+    return data.get("markets", [])
 
-    if not candidates:
-        raise Exception("No BTC 15-minute markets found. Make sure KALSHI_ENV=prod.")
 
-    selected = select_new_open_market(candidates)
+def seconds_until_market_close(market):
+    close_time = market.get("close_time") or market.get("expiration_time") or ""
 
-    print("BTC 15M CANDIDATES FOUND:", len(candidates))
-    print("SELECTED MARKET:", selected.get("ticker"), selected.get("title"), selected.get("close_time"))
+    if not close_time:
+        return None
 
-    return selected
+    parsed_close_time = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
+    now = datetime.now(timezone.utc)
+
+    return (parsed_close_time - now).total_seconds()
+
+
+def select_fresh_new_market(candidates):
+    valid_markets = []
+
+    for market in candidates:
+        try:
+            seconds_left = seconds_until_market_close(market)
+        except Exception:
+            continue
+
+        if seconds_left is None:
+            continue
+
+        print(
+            "MARKET CHECK:",
+            market.get("ticker"),
+            "SECONDS LEFT:",
+            seconds_left,
+            "CLOSE:",
+            market.get("close_time") or market.get("expiration_time"),
+        )
+
+        # Must be a fresh new 15m market, not the old one.
+        if seconds_left >= FRESH_MARKET_SECONDS_LEFT:
+            valid_markets.append(market)
+
+    if not valid_markets:
+        raise Exception("No fresh BTC 15-minute market available yet")
+
+    valid_markets.sort(
+        key=lambda market: datetime.fromisoformat(
+            (market.get("close_time") or market.get("expiration_time")).replace("Z", "+00:00")
+        )
+    )
+
+    return valid_markets[0]
+
+
+def wait_for_fresh_btc_15m_market(alert_market=None):
+    exact = normalize_market_hint(alert_market)
+
+    print("NORMALIZED MARKET HINT:", exact)
+
+    start_time = time.time()
+    last_error = None
+
+    while time.time() - start_time < MAX_WAIT_SECONDS:
+        try:
+            # If a real exact market ticker is sent, check it directly.
+            # KXBTC15M is only the series ticker, not exact.
+            if exact and exact != "KXBTC15M":
+                direct_market = get_market_by_ticker(exact)
+
+                if direct_market:
+                    selected = select_fresh_new_market([direct_market])
+                    print("SELECTED EXACT MARKET:", selected.get("ticker"))
+                    return selected
+
+            candidates = get_btc_15m_candidates()
+
+            if candidates:
+                selected = select_fresh_new_market(candidates)
+                print(
+                    "SELECTED FRESH MARKET:",
+                    selected.get("ticker"),
+                    selected.get("title"),
+                    selected.get("close_time"),
+                )
+                return selected
+
+            last_error = Exception("No BTC 15m candidates returned")
+
+        except Exception as error:
+            last_error = error
+            print("MARKET NOT READY YET. RETRYING:", str(error))
+
+        time.sleep(1)
+
+    raise Exception(
+        f"No fresh BTC 15-minute market found after {MAX_WAIT_SECONDS} seconds. "
+        f"Last error: {last_error}"
+    )
 
 
 def calculate_contracts(stake_dollars, max_price_cents):
@@ -283,7 +298,8 @@ def home():
             "environment": KALSHI_ENV,
             "base_url": BASE_URL,
             "default_max_price": DEFAULT_MAX_PRICE,
-            "min_seconds_left": MIN_SECONDS_LEFT,
+            "max_wait_seconds": MAX_WAIT_SECONDS,
+            "fresh_market_seconds_left": FRESH_MARKET_SECONDS_LEFT,
         }
     )
 
@@ -296,7 +312,7 @@ def health():
 @app.route("/test-market", methods=["GET"])
 def test_market():
     try:
-        market = get_current_btc_15m_market("BTC15M")
+        market = wait_for_fresh_btc_15m_market("BTC15M")
 
         return jsonify(
             {
@@ -305,6 +321,7 @@ def test_market():
                 "title": market.get("title"),
                 "close_time": market.get("close_time"),
                 "market_status": market.get("status"),
+                "seconds_left": seconds_until_market_close(market),
             }
         ), 200
 
@@ -331,7 +348,9 @@ def webhook():
             raise Exception("MAX_PRICE is too high. Use 0.65 for 65 cents, or 65.")
 
         market_hint = parsed.get("MARKET")
-        market = get_current_btc_15m_market(market_hint)
+
+        # This waits for the newly opened market instead of trading the closed one.
+        market = wait_for_fresh_btc_15m_market(market_hint)
         market_ticker = market["ticker"]
 
         contracts = calculate_contracts(stake, max_price_cents)
@@ -361,6 +380,7 @@ def webhook():
             "side": side,
             "contracts": contracts,
             "max_price_cents": max_price_cents,
+            "seconds_left": seconds_until_market_close(market),
             "kalshi_response": response.text,
         }
 
