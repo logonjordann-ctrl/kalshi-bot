@@ -10,7 +10,6 @@ PRIVATE_KEY_TEXT = os.getenv("KALSHI_PRIVATE_KEY")
 KALSHI_ENV = os.getenv("KALSHI_ENV", "demo")
 
 BASE_URL = "https://demo-api.kalshi.co" if KALSHI_ENV == "demo" else "https://api.elections.kalshi.com"
-
 BTC_SERIES = "KXBCTC15M"
 
 
@@ -45,40 +44,42 @@ def sign_request(method, path):
 
 def get_current_btc_ticker():
     path = "/trade-api/v2/markets"
+    cursor = None
+    all_markets = []
 
-    response = requests.get(
-        BASE_URL + path,
-        params={
+    while True:
+        params = {
+            "series_ticker": BTC_SERIES,
             "status": "open",
             "limit": 1000
-        },
-        timeout=10
-    )
+        }
 
-    print("MARKETS STATUS:", response.status_code)
-    print("MARKETS RESPONSE:", response.text[:1000])
+        if cursor:
+            params["cursor"] = cursor
 
-    data = response.json()
-    markets = data.get("markets", [])
+        response = requests.get(
+            BASE_URL + path,
+            params=params,
+            timeout=10
+        )
 
-    active = []
-    for m in markets:
-        ticker = str(m.get("ticker", "")).upper()
-        title = str(m.get("title", "")).lower()
-        status = str(m.get("status", "")).lower()
+        print("MARKETS STATUS:", response.status_code)
+        print("MARKETS RESPONSE:", response.text[:1000])
 
-        if status == "open" and (
-            ticker.startswith(BTC_SERIES)
-            or ("btc" in ticker and "15m" in ticker)
-            or ("bitcoin" in title and "15" in title)
-        ):
-            active.append(m)
+        response.raise_for_status()
+        data = response.json()
 
-    if not active:
-        raise Exception("No active BTC 15m market found")
+        all_markets.extend(data.get("markets", []))
 
-    active.sort(key=lambda m: m.get("close_time") or m.get("expiration_time") or "")
-    ticker = active[0]["ticker"]
+        cursor = data.get("cursor")
+        if not cursor:
+            break
+
+    if not all_markets:
+        raise Exception("No open BTC 15m markets found from series_ticker")
+
+    all_markets.sort(key=lambda m: m.get("close_time") or m.get("expiration_time") or "")
+    ticker = all_markets[0]["ticker"]
 
     print("ACTIVE MARKET TICKER:", ticker)
     return ticker
