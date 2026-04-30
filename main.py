@@ -11,8 +11,8 @@ KALSHI_ENV = os.getenv("KALSHI_ENV", "demo")
 
 BASE_URL = "https://demo-api.kalshi.co" if KALSHI_ENV == "demo" else "https://api.kalshi.com"
 
-# Current demo BTC 15-minute ticker
-MARKET_TICKER = "KXBCTC15M-26APR301530"
+# Current demo BTC 15-minute ticker from your URL
+MARKET_TICKER = "KXBCTC15M-26APR301545"
 
 
 def load_private_key():
@@ -51,6 +51,7 @@ def webhook():
 
     try:
         parsed = dict(part.split("=") for part in data.split("|"))
+        print("PARSED:", parsed)
 
         direction = parsed["SIDE"].lower()
         stake = float(parsed["STAKE"])
@@ -68,14 +69,15 @@ def webhook():
             print("SKIPPED - TOO SMALL")
             return {"status": "SKIPPED - TOO SMALL"}
 
-        if direction == "above":
+        if direction in ["above", "yes"]:
             kalshi_side = "yes"
             price_field = "yes_price"
-        elif direction == "below":
+        elif direction in ["below", "no"]:
             kalshi_side = "no"
             price_field = "no_price"
         else:
-            return {"error": "SIDE must be ABOVE or BELOW"}
+            print("INVALID SIDE:", direction)
+            return {"error": f"Invalid SIDE: {direction}"}
 
         order = {
             "ticker": MARKET_TICKER,
