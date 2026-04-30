@@ -10,10 +10,6 @@ from cryptography.hazmat.primitives.asymmetric import padding
 
 app = Flask(__name__)
 
-# Railway environment variables needed:
-# KALSHI_API_KEY_ID
-# KALSHI_PRIVATE_KEY
-# Optional: KALSHI_ENV=prod or demo. Default is prod.
 API_KEY_ID = os.getenv("KALSHI_API_KEY_ID")
 PRIVATE_KEY_TEXT = os.getenv("KALSHI_PRIVATE_KEY")
 KALSHI_ENV = os.getenv("KALSHI_ENV", "prod").lower().strip()
@@ -96,14 +92,17 @@ def parse_alert(raw_text):
     for part in raw_text.replace("\n", "|").split("|"):
         if "=" not in part:
             continue
+
         key, value = part.split("=", 1)
         key = key.strip().upper()
         value = value.strip()
+
         if key:
             parsed[key] = value
 
     required = ["SIDE", "STAKE"]
     missing = [key for key in required if key not in parsed]
+
     if missing:
         raise Exception(f"Alert missing required field(s): {', '.join(missing)}")
 
@@ -112,8 +111,10 @@ def parse_alert(raw_text):
 
 def dollars_to_cents(price):
     price_float = float(price)
+
     if price_float <= 1:
         return int(round(price_float * 100))
+
     return int(round(price_float))
 
 
@@ -127,6 +128,15 @@ def normalize_side(value):
         return "no"
 
     raise Exception(f"Invalid SIDE value: {value}")
+
+
+def normalize_market_hint(value):
+    hint = str(value or "").strip().upper()
+
+    if hint in ["", "BTC15M", "BTC_15M", "BTC-15M", "BTCUSD15M", "BTCUSD_15M", "BTCUSD-15M"]:
+        return "KXBTC15M"
+
+    return hint
 
 
 def market_is_btc_15m(market):
@@ -198,30 +208,43 @@ def get_market_by_ticker(ticker):
     return None
 
 
-def normalize_market_hint(value):
-    hint = str(value or "").strip().upper()
-
-    if hint in ["", "BTC15M", "BTC_15M", "BTC-15M", "BTCUSD15M", "BTCUSD_15M", "BTCUSD-15M"]:
-        return "KXBTC15M"
-
-    return hint
-
-
 def select_nearest_open_market(candidates):
     now = datetime.now(timezone.utc)
+    valid_markets = []
 
-    def close_sort_key(market):
+    for market in candidates:
+        status = str(market.get("status", "")).lower()
+        status_market = str(market.get("status_market", "")).lower()
+
         close_time = market.get("close_time") or market.get("expiration_time") or ""
-        try:
-            parsed_time = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
-            if parsed_time < now:
-                return "9999-99-99T99:99:99Z"
-            return close_time
-        except Exception:
-            return close_time or "9999-99-99T99:99:99Z"
 
-    candidates.sort(key=close_sort_key)
-    return candidates[0]
+        try:
+            parsed_close_time = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
+        except Exception:
+            continue
+
+        seconds_until_close = (parsed_close_time - now).total_seconds()
+
+        # Do NOT trade closed markets.
+        # Do NOT trade markets with less than 10 minutes left.
+        # This keeps the bot focused on the newly opened 15-minute market.
+        if status in ["open", "active"] or status_market in ["open", "active"]:
+            if seconds_until_close > 600:
+                valid_markets.append(market)
+
+    if not valid_markets:
+        raise Exception(
+            "No valid BTC 15-minute market with more than 10 minutes left. "
+            "Waiting for the new market to open."
+        )
+
+    valid_markets.sort(
+        key=lambda market: datetime.fromisoformat(
+            (market.get("close_time") or market.get("expiration_time")).replace("Z", "+00:00")
+        )
+    )
+
+    return valid_markets[0]
 
 
 def get_current_btc_15m_market(alert_market=None):
@@ -233,9 +256,11 @@ def get_current_btc_15m_market(alert_market=None):
     # KXBTC15M is a series ticker, not an exact market ticker.
     if exact and exact != "KXBTC15M":
         direct_market = get_market_by_ticker(exact)
-        if direct_market and str(direct_market.get("status", "")).lower() == "open":
+
+        if direct_market:
+            selected = select_nearest_open_market([direct_market])
             print("USING EXACT ALERT MARKET TICKER:", exact)
-            return direct_market
+            return selected
 
     # Search the Kalshi BTC 15-minute series.
     path = "/trade-api/v2/markets"
@@ -263,15 +288,14 @@ def get_current_btc_15m_market(alert_market=None):
         candidates = [m for m in all_open if market_is_btc_15m(m)]
 
     if not candidates:
-        print("BTC 15M CANDIDATES FOUND: 0")
         raise Exception(
-            "No open BTC 15-minute market found. Make sure KALSHI_ENV=prod."
+            "No BTC 15-minute markets found. Make sure KALSHI_ENV=prod."
         )
 
     selected = select_nearest_open_market(candidates)
 
     print("BTC 15M CANDIDATES FOUND:", len(candidates))
-    print("SELECTED MARKET:", selected.get("ticker"), selected.get("title"))
+    print("SELECTED MARKET:", selected.get("ticker"), selected.get("title"), selected.get("close_time"))
 
     return selected
 
@@ -312,6 +336,7 @@ def health():
 def test_market():
     try:
         market = get_current_btc_15m_market("BTC15M")
+
         return jsonify(
             {
                 "status": "OK",
@@ -321,6 +346,7 @@ def test_market():
                 "status_market": market.get("status"),
             }
         ), 200
+
     except Exception as error:
         return jsonify({"status": "ERROR", "error": str(error)}), 400
 
