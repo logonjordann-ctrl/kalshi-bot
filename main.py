@@ -71,7 +71,8 @@ def webhook():
             "side": side,
             "action": "buy",
             "count": contracts,
-            "type": "market"
+            "type": "market",
+            "yes_price": int(live_price * 100)
         }
 
         print("ORDER:", order)
