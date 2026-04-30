@@ -11,8 +11,8 @@ KALSHI_ENV = os.getenv("KALSHI_ENV", "demo")
 
 BASE_URL = "https://demo-api.kalshi.co" if KALSHI_ENV == "demo" else "https://api.kalshi.com"
 
-# This expires every 15 minutes
-MARKET_TICKER = "KXBCTC15M-26APR301515"
+# Current demo BTC 15-minute ticker
+MARKET_TICKER = "KXBCTC15M-26APR301530"
 
 
 def load_private_key():
