@@ -11,6 +11,10 @@ KALSHI_ENV = os.getenv("KALSHI_ENV", "demo")
 
 BASE_URL = "https://demo-api.kalshi.co" if KALSHI_ENV == "demo" else "https://api.kalshi.co"
 
+# TEMP ticker from your current demo market page.
+# This expires, so after test we will make it automatic.
+MARKET_TICKER = "KXBCT15M-26APR301500"
+
 
 def load_private_key():
     return serialization.load_pem_private_key(
@@ -66,7 +70,7 @@ def webhook():
             return {"status": "SKIPPED - TOO SMALL"}
 
         order = {
-            "ticker": "BTC-15M",
+            "ticker": MARKET_TICKER,
             "client_order_id": str(uuid.uuid4()),
             "side": side,
             "action": "buy",
