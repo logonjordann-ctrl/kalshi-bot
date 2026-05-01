@@ -21,13 +21,12 @@ BASE_URL = (
 )
 
 DEFAULT_MAX_PRICE = 0.65
-
-# Wait longer for Kalshi to publish the new 15m market
 MAX_WAIT_SECONDS = 90
-
-# Accept markets with more than 10 minutes left
-# This blocks old/closed markets but allows the new market once it appears
 FRESH_MARKET_SECONDS_LEFT = 600
+
+# Resting limit order.
+# If price is not available immediately, order stays open until filled/canceled/market close.
+ORDER_TIME_IN_FORCE = "good_till_cancelled"
 
 
 def load_private_key():
@@ -71,19 +70,9 @@ def request_kalshi(method, path, params=None, body=None, timeout=15):
     headers = sign_request(method, path)
 
     if method.upper() == "GET":
-        response = requests.get(
-            BASE_URL + path,
-            headers=headers,
-            params=params,
-            timeout=timeout,
-        )
+        response = requests.get(BASE_URL + path, headers=headers, params=params, timeout=timeout)
     elif method.upper() == "POST":
-        response = requests.post(
-            BASE_URL + path,
-            headers=headers,
-            json=body,
-            timeout=timeout,
-        )
+        response = requests.post(BASE_URL + path, headers=headers, json=body, timeout=timeout)
     else:
         raise Exception(f"Unsupported method: {method}")
 
@@ -107,7 +96,6 @@ def parse_alert(raw_text):
         parsed["SIDE"] = parsed["ACTION"]
 
     missing = [key for key in ["SIDE", "STAKE"] if key not in parsed]
-
     if missing:
         raise Exception(f"Alert missing required field(s): {', '.join(missing)}")
 
@@ -171,9 +159,7 @@ def get_btc_15m_candidates():
     )
 
     response.raise_for_status()
-    data = response.json()
-
-    return data.get("markets", [])
+    return response.json().get("markets", [])
 
 
 def seconds_until_market_close(market):
@@ -297,6 +283,7 @@ def home():
             "default_max_price": DEFAULT_MAX_PRICE,
             "max_wait_seconds": MAX_WAIT_SECONDS,
             "fresh_market_seconds_left": FRESH_MARKET_SECONDS_LEFT,
+            "order_time_in_force": ORDER_TIME_IN_FORCE,
         }
     )
 
@@ -342,7 +329,7 @@ def webhook():
         max_price_cents = dollars_to_cents(max_price)
 
         if max_price_cents > 99:
-            raise Exception("MAX_PRICE is too high. Use 0.65 for 65 cents, or 65.")
+            raise Exception("MAX_PRICE is too high. Use 0.45 for 45 cents, or 45.")
 
         market_hint = parsed.get("MARKET")
 
@@ -361,7 +348,7 @@ def webhook():
             "count": contracts,
             "type": "limit",
             price_field: max_price_cents,
-            "time_in_force": "immediate_or_cancel",
+            "time_in_force": ORDER_TIME_IN_FORCE,
         }
 
         print("ORDER:", order)
@@ -377,6 +364,7 @@ def webhook():
             "contracts": contracts,
             "max_price_cents": max_price_cents,
             "seconds_left": seconds_until_market_close(market),
+            "order_time_in_force": ORDER_TIME_IN_FORCE,
             "kalshi_response": response.text,
         }
 
